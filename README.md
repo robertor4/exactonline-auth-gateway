@@ -14,6 +14,8 @@ A Node.js Azure Function that acts as an authentication gateway for Azure Data F
 ## System Architecture
 
 ### High-Level Architecture
+The following diagram illustrates the overall system architecture, showing how the Azure Function App acts as a central authentication gateway between Azure Data Factory and Exact Online. The Function App manages all OAuth 2.0 complexity, including token storage, refresh, and credential management through Azure Key Vault. This design ensures that sensitive credentials and tokens are securely stored and managed within Azure's security boundaries.
+
 ```mermaid
 graph TB
     subgraph Azure Cloud
@@ -46,7 +48,9 @@ graph TB
     FA -->|Read Credentials| KV
 ```
 
-### Authentication Flow
+### Authentication Flow (one-time setup)
+This sequence diagram details the initial authorization process. When a new integration is set up, the client must first obtain an authorization URL, which they use to grant access to their Exact Online account. The Function App then exchanges the authorization code for access and refresh tokens, storing the refresh token securely in Key Vault for future use. This is a one-time setup process that establishes the foundation for ongoing token management.
+
 ```mermaid
 sequenceDiagram
     participant Client
@@ -69,6 +73,8 @@ sequenceDiagram
 ```
 
 ### Token Refresh Flow
+The token refresh flow diagram shows how the system maintains continuous access to Exact Online's API. When Azure Data Factory needs to make an API call, it first requests a valid token from the Function App. The Function App checks if the current token is valid, and if not, it uses the stored refresh token to obtain a new access token. This process is transparent to the client and ensures uninterrupted access while respecting Exact Online's refresh token limitations.
+
 ```mermaid
 sequenceDiagram
     participant ADF
@@ -92,6 +98,8 @@ sequenceDiagram
 ```
 
 ### Component Dependencies
+This diagram maps out the internal structure of the Function App, showing how different components interact with each other and external services. The core application logic is organized into distinct components for configuration management, token storage, and endpoint handling. Each component has specific responsibilities and dependencies, creating a modular and maintainable architecture.
+
 ```mermaid
 graph LR
     subgraph Core Components
@@ -106,7 +114,7 @@ graph LR
         EO[Exact Online]
     end
     
-    subgraph Endpoints
+    subgraph API Endpoints
         Status[Status]
         AuthUrl[Auth URL]
         Authorize[Authorize]
@@ -128,6 +136,8 @@ graph LR
 ```
 
 ### Security Architecture
+The security architecture diagram outlines the multiple layers of security implemented in the system. From Azure Key Vault for secret management to network security controls and authentication mechanisms, each layer provides specific protection against different types of threats. This multi-layered approach ensures that sensitive data and operations are protected at every level of the application.
+
 ```mermaid
 graph TB
     subgraph Azure Security
