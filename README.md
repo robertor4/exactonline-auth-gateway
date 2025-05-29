@@ -11,6 +11,152 @@ A Node.js Azure Function that acts as an authentication gateway for Azure Data F
 - **Production Ready**: Error handling, logging, and health checks included
 - **Azure Key Vault Integration**: Secure storage of credentials and tokens
 
+## System Architecture
+
+### High-Level Architecture
+```mermaid
+graph TB
+    subgraph Azure Cloud
+        KV[Azure Key Vault]
+        FA[Function App]
+        ADF[Azure Data Factory]
+    end
+    
+    subgraph Function App Components
+        Status[Status Endpoint]
+        AuthUrl[Auth URL Endpoint]
+        Authorize[Authorize Endpoint]
+        GetToken[Get Token Endpoint]
+        TokenStore[Token Store]
+    end
+    
+    subgraph Exact Online
+        Auth[OAuth Server]
+        API[Exact API]
+    end
+    
+    ADF -->|1 Get Token| GetToken
+    GetToken -->|2 Check Cache| TokenStore
+    TokenStore -->|3 Refresh if needed| Auth
+    Auth -->|4 Return Token| GetToken
+    GetToken -->|5 Return Token| ADF
+    ADF -->|6 Use Token| API
+    
+    KV -->|Store/Retrieve Secrets| FA
+    FA -->|Read Credentials| KV
+```
+
+### Authentication Flow
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Function
+    participant KeyVault
+    participant Exact
+    
+    Note over Client,Exact: Initial Authorization Flow
+    Client->>Function: GET /api/authUrl
+    Function->>KeyVault: Get Client ID & Secret
+    KeyVault-->>Function: Return Credentials
+    Function-->>Client: Return Auth URL
+    Client->>Exact: Visit Auth URL
+    Exact-->>Client: Redirect with Auth Code
+    Client->>Function: GET /api/authorize?code=xxx
+    Function->>Exact: Exchange Code for Tokens
+    Exact-->>Function: Return Access & Refresh Tokens
+    Function->>KeyVault: Store Refresh Token
+    Function-->>Client: Return Success
+```
+
+### Token Refresh Flow
+```mermaid
+sequenceDiagram
+    participant ADF
+    participant Function
+    participant KeyVault
+    participant Exact
+    
+    ADF->>Function: GET /api/getToken
+    Function->>Function: Check Token Validity
+    
+    alt Token Valid
+        Function-->>ADF: Return Cached Token
+    else Token Expired
+        Function->>KeyVault: Get Refresh Token
+        KeyVault-->>Function: Return Refresh Token
+        Function->>Exact: Refresh Token Request
+        Exact-->>Function: New Access Token
+        Function->>KeyVault: Store New Refresh Token
+        Function-->>ADF: Return New Token
+    end
+```
+
+### Component Dependencies
+```mermaid
+graph LR
+    subgraph Core Components
+        App[app.js]
+        Config[Configuration]
+        TokenStore[Token Store]
+        Credentials[Credentials Cache]
+    end
+    
+    subgraph External Services
+        KV[Azure Key Vault]
+        EO[Exact Online]
+    end
+    
+    subgraph Endpoints
+        Status[Status]
+        AuthUrl[Auth URL]
+        Authorize[Authorize]
+        GetToken[Get Token]
+    end
+    
+    App --> Config
+    App --> TokenStore
+    App --> Credentials
+    App --> Status
+    App --> AuthUrl
+    App --> Authorize
+    App --> GetToken
+    
+    Credentials --> KV
+    TokenStore --> KV
+    Authorize --> EO
+    GetToken --> EO
+```
+
+### Security Architecture
+```mermaid
+graph TB
+    subgraph Azure Security
+        KV[Azure Key Vault]
+        MI[Managed Identity]
+        FA[Function App]
+        ADF[Azure Data Factory]
+    end
+    
+    subgraph Authentication
+        FK[Function Keys]
+        AAD[Azure AD]
+    end
+    
+    subgraph Network Security
+        VNET[Virtual Network]
+        IP[IP Restrictions]
+        PE[Private Endpoints]
+    end
+    
+    FA -->|Uses| MI
+    MI -->|Access| KV
+    FA -->|Protected by| FK
+    FA -->|Optional| AAD
+    FA -->|Inside| VNET
+    VNET -->|Controls| IP
+    VNET -->|Uses| PE
+```
+
 ## API Endpoints
 
 ### 1. Get Valid Access Token
