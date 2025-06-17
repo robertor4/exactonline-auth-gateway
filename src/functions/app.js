@@ -69,9 +69,33 @@ async function getCredentials() {
 }
 
 /**
- * Store refresh token in Key Vault for persistence
+ * Store tokens and metadata in Key Vault for persistence
+ */
+async function storeTokenData(refreshToken, accessToken, expiresAt, lastRefresh) {
+    try {
+        // Store refresh token
+        await secretClient.setSecret('exact-refresh-token', refreshToken);
+        
+        // Store token metadata as JSON
+        const metadata = {
+            accessToken: accessToken,
+            expiresAt: expiresAt,
+            lastRefresh: lastRefresh,
+            storedAt: Date.now()
+        };
+        await secretClient.setSecret('exact-token-metadata', JSON.stringify(metadata));
+        
+        console.log('Tokens and metadata stored in Key Vault');
+    } catch (error) {
+        console.error('Failed to store token data in Key Vault:', error.message);
+    }
+}
+
+/**
+ * Store refresh token in Key Vault for persistence (backward compatibility)
  */
 async function storeRefreshToken(refreshToken) {
+    // Just store refresh token, used during initial auth
     try {
         await secretClient.setSecret('exact-refresh-token', refreshToken);
         console.log('Refresh token stored in Key Vault');
@@ -121,19 +145,45 @@ async function initializeTokenStore() {
     });
     
     try {
+        // First, try to load token metadata (access token, expiry, etc.)
+        try {
+            const metadataSecret = await secretClient.getSecret('exact-token-metadata');
+            if (metadataSecret && metadataSecret.value) {
+                const metadata = JSON.parse(metadataSecret.value);
+                console.log('Found token metadata in Key Vault:', {
+                    hasAccessToken: !!metadata.accessToken,
+                    expiresAt: metadata.expiresAt ? new Date(metadata.expiresAt).toISOString() : null,
+                    lastRefresh: metadata.lastRefresh ? new Date(metadata.lastRefresh).toISOString() : null,
+                    storedAt: metadata.storedAt ? new Date(metadata.storedAt).toISOString() : null
+                });
+                
+                // Restore all token data
+                tokenStore.access_token = metadata.accessToken;
+                tokenStore.expires_at = metadata.expiresAt;
+                tokenStore.last_refresh = metadata.lastRefresh;
+                
+                console.log('Token metadata restored. Token valid:', isTokenValid());
+            }
+        } catch (metadataError) {
+            console.log('No token metadata found in Key Vault (normal for first run or after expiry)');
+        }
+        
+        // Then load refresh token
         const storedRefreshToken = await getStoredRefreshToken();
         if (storedRefreshToken) {
             tokenStore.refresh_token = storedRefreshToken;
-            console.log('Refresh token loaded from Key Vault into memory');
-            console.log('Updated token store state:', {
-                hasAccessToken: !!tokenStore.access_token,
-                hasRefreshToken: !!tokenStore.refresh_token,
-                expiresAt: tokenStore.expires_at,
-                lastRefresh: tokenStore.last_refresh
-            });
+            console.log('Refresh token loaded from Key Vault');
         } else {
-            console.log('No refresh token found in Key Vault during initialization');
+            console.log('No refresh token found in Key Vault');
         }
+        
+        console.log('Final token store state after initialization:', {
+            hasAccessToken: !!tokenStore.access_token,
+            hasRefreshToken: !!tokenStore.refresh_token,
+            expiresAt: tokenStore.expires_at ? new Date(tokenStore.expires_at).toISOString() : null,
+            lastRefresh: tokenStore.last_refresh ? new Date(tokenStore.last_refresh).toISOString() : null,
+            isValid: isTokenValid()
+        });
     } catch (error) {
         console.error('Failed to initialize token store:', {
             message: error.message,
@@ -256,8 +306,13 @@ async function refreshAccessToken() {
         tokenStore.expires_at = now + (response.data.expires_in * 1000);
         tokenStore.last_refresh = now;
 
-        // Store new refresh token in Key Vault
-        await storeRefreshToken(response.data.refresh_token);
+        // Store tokens and metadata in Key Vault
+        await storeTokenData(
+            response.data.refresh_token,
+            response.data.access_token,
+            tokenStore.expires_at,
+            tokenStore.last_refresh
+        );
 
         console.log('Tokens refreshed successfully', {
             expiresAt: new Date(tokenStore.expires_at).toISOString(),
@@ -334,8 +389,13 @@ async function exchangeCodeForTokens(authCode) {
         tokenStore.expires_at = now + (response.data.expires_in * 1000);
         tokenStore.last_refresh = now;
 
-        // Store refresh token in Key Vault
-        await storeRefreshToken(response.data.refresh_token);
+        // Store tokens and metadata in Key Vault
+        await storeTokenData(
+            response.data.refresh_token,
+            response.data.access_token,
+            tokenStore.expires_at,
+            tokenStore.last_refresh
+        );
 
         console.log('Initial tokens obtained successfully');
         
@@ -356,7 +416,18 @@ console.log('Environment configuration:', {
     tokenBuffer: CONFIG.TOKEN_BUFFER
 });
 
-initializeTokenStore().catch(error => {
+// Track initialization state
+let initializePromise = null;
+async function ensureInitialized() {
+    if (!initializePromise) {
+        console.log('First request after cold start - initializing token store...');
+        initializePromise = initializeTokenStore();
+    }
+    return initializePromise;
+}
+
+// Start initialization immediately
+ensureInitialized().catch(error => {
     console.error('Failed to initialize token store:', error);
 });
 
@@ -366,6 +437,9 @@ app.http('getToken', {
     authLevel: 'function',
     handler: async (request, context) => {
         try {
+            // Ensure initialization is complete
+            await ensureInitialized();
+            
             // Check if we have a valid token
             if (isTokenValid()) {
                 return {
@@ -390,6 +464,12 @@ app.http('getToken', {
             });
             
             if (hasRefreshTokenInMemory || refreshTokenFromVault) {
+                // Ensure refresh token is in memory before attempting refresh
+                if (!hasRefreshTokenInMemory && refreshTokenFromVault) {
+                    context.log('Setting refresh token from vault into memory');
+                    tokenStore.refresh_token = refreshTokenFromVault;
+                }
+                
                 context.log('Attempting to refresh token...');
                 try {
                     const newToken = await refreshAccessToken();
@@ -515,7 +595,9 @@ app.http('status', {
     methods: ['GET'],
     authLevel: 'anonymous',
     handler: async (request, context) => {
-        const now = Date.now();
+        // Ensure initialization is complete
+        await ensureInitialized();
+        
         const hasTokens = !!tokenStore.access_token;
         const isValid = isTokenValid();
         const canRefresh = canRefreshToken();
@@ -536,6 +618,67 @@ app.http('status', {
                     url: KEY_VAULT_URL,
                     credentials_cached: !!credentialsCache.CLIENT_ID
                 }
+            }
+        };
+    }
+});
+
+// Azure Function: Debug endpoint
+app.http('debug', {
+    methods: ['GET'],
+    authLevel: 'function',
+    handler: async (request, context) => {
+        // Force initialization
+        await ensureInitialized();
+        
+        // Try to get refresh token directly
+        let refreshTokenFromVault = null;
+        let vaultError = null;
+        try {
+            refreshTokenFromVault = await getStoredRefreshToken();
+        } catch (error) {
+            vaultError = {
+                message: error.message,
+                code: error.code,
+                statusCode: error.statusCode
+            };
+        }
+        
+        // Try to get credentials
+        let credentialsError = null;
+        try {
+            await getCredentials();
+        } catch (error) {
+            credentialsError = {
+                message: error.message,
+                code: error.code
+            };
+        }
+        
+        return {
+            status: 200,
+            jsonBody: {
+                tokenStore: {
+                    hasAccessToken: !!tokenStore.access_token,
+                    hasRefreshToken: !!tokenStore.refresh_token,
+                    refreshTokenLength: tokenStore.refresh_token ? tokenStore.refresh_token.length : 0,
+                    expiresAt: tokenStore.expires_at,
+                    lastRefresh: tokenStore.last_refresh
+                },
+                keyVault: {
+                    url: KEY_VAULT_URL,
+                    hasRefreshTokenInVault: !!refreshTokenFromVault,
+                    refreshTokenLengthInVault: refreshTokenFromVault ? refreshTokenFromVault.length : 0,
+                    vaultError: vaultError,
+                    credentialsError: credentialsError
+                },
+                environment: {
+                    hasKeyVaultUrl: !!process.env.KEY_VAULT_URL,
+                    keyVaultUrl: process.env.KEY_VAULT_URL,
+                    hasExactTokenUrl: !!process.env.EXACT_TOKEN_URL,
+                    nodeVersion: process.version
+                },
+                timestamp: new Date().toISOString()
             }
         };
     }
