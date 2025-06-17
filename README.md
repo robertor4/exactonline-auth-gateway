@@ -410,13 +410,20 @@ After initial authorization, you can test token retrieval:
 1. Install Azure Functions Core Tools
 2. Clone this repository
 3. Install dependencies: `npm install`
-4. Create a `.env` file with your environment variables:
+4. Copy `.env.example` to `.env` and configure:
+   ```bash
+   cp .env.example .env
+   ```
+   Then edit `.env` with your values:
    ```
    KEY_VAULT_URL=https://your-keyvault-name.vault.azure.net/
-   EXACT_TOKEN_URL=https://start.exactonline.nl/api/oauth2/token
-   EXACT_AUTH_URL=https://start.exactonline.nl/api/oauth2/auth
+   EXACT_CLIENT_ID=your-client-id
+   EXACT_CLIENT_SECRET=your-client-secret
+   EXACT_REDIRECT_URI=https://your-function-app.azurewebsites.net/api/authorize
    ```
 5. Run locally: `npm start`
+
+**Note**: For production deployments, store sensitive values like `EXACT_CLIENT_ID` and `EXACT_CLIENT_SECRET` in Azure Key Vault instead of environment variables.
 
 ## Security Considerations
 
