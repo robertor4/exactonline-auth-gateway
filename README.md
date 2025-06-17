@@ -10,6 +10,8 @@ A Node.js Azure Function that acts as an authentication gateway for Azure Data F
 - **Security Focused**: Refresh tokens never leave the service
 - **Production Ready**: Error handling, logging, and health checks included
 - **Azure Key Vault Integration**: Secure storage of credentials and tokens
+- **Cold Start Resilient**: Access tokens persist across Function App restarts
+- **Rate Limit Compliant**: Won't attempt refresh if token is still valid
 
 ## System Architecture
 
@@ -481,6 +483,12 @@ After initial authorization, you can test token retrieval:
    - Verify the refresh token exists: `az keyvault secret show --vault-name your-keyvault --name exact-refresh-token`
    - If missing, the Function App likely lacks write permissions
 
+6. **"Rate limit exceeded: access_token not expired"**
+   - Exact Online prevents refreshing tokens that haven't expired yet
+   - This can happen after Function App restarts when the access token is lost from memory
+   - The function now persists access tokens to prevent this issue
+   - If you see this error, wait for the token to expire naturally before retrying
+
 ### Key Vault Permission Issues
 
 If tokens aren't persisting after authorization, the Function App may lack Key Vault permissions. This is a common issue when using RBAC-enabled Key Vaults.
@@ -568,9 +576,11 @@ Check Function App logs in Azure Portal:
 ## Production Considerations
 
 ### Token Persistence
-- Refresh tokens stored in Key Vault
-- Access tokens cached in memory
-- Automatic token refresh with 1-minute buffer
+- Both access and refresh tokens stored in Key Vault with metadata
+- Tokens survive Function App restarts and cold starts
+- Access token metadata includes expiry time and last refresh timestamp
+- Automatic token refresh with 1-minute buffer before expiry
+- Respects Exact Online's rate limiting (won't refresh valid tokens)
 
 ### High Availability
 - Deploy across multiple regions
