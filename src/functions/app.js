@@ -134,12 +134,23 @@ function canRefreshToken() {
  * Refreshes the access token using the refresh token
  */
 async function refreshAccessToken() {
+    console.log('Starting token refresh process...');
+    console.log('Current token store state:', {
+        hasAccessToken: !!tokenStore.access_token,
+        hasRefreshToken: !!tokenStore.refresh_token,
+        expiresAt: tokenStore.expires_at,
+        lastRefresh: tokenStore.last_refresh
+    });
+    
     if (!tokenStore.refresh_token) {
+        console.log('No refresh token in memory, checking Key Vault...');
         // Try to load from Key Vault
         const storedRefreshToken = await getStoredRefreshToken();
         if (storedRefreshToken) {
+            console.log('Refresh token retrieved from Key Vault');
             tokenStore.refresh_token = storedRefreshToken;
         } else {
+            console.error('No refresh token found in Key Vault');
             throw new Error('No refresh token available. Initial authorization required.');
         }
     }
@@ -180,8 +191,21 @@ async function refreshAccessToken() {
         
         return tokenStore.access_token;
     } catch (error) {
-        console.error('Token refresh failed:', error.response?.data || error.message);
-        throw new Error('Failed to refresh token. May need to re-authorize.');
+        console.error('Token refresh failed:', {
+            message: error.message,
+            response: error.response?.data,
+            status: error.response?.status,
+            headers: error.response?.headers
+        });
+        
+        // Provide more specific error message based on the error
+        if (error.response?.status === 400) {
+            throw new Error(`Refresh token invalid or expired: ${JSON.stringify(error.response.data)}`);
+        } else if (error.response?.status === 401) {
+            throw new Error('Refresh token unauthorized. Re-authorization required.');
+        } else {
+            throw new Error(`Failed to refresh token: ${error.message}`);
+        }
     }
 }
 
@@ -249,15 +273,22 @@ app.http('getToken', {
 
             // Try to refresh the token
             if (tokenStore.refresh_token || await getStoredRefreshToken()) {
-                const newToken = await refreshAccessToken();
-                return {
-                    status: 200,
-                    jsonBody: {
-                        access_token: newToken,
-                        expires_at: tokenStore.expires_at,
-                        status: 'refreshed'
-                    }
-                };
+                context.log('Attempting to refresh token...');
+                try {
+                    const newToken = await refreshAccessToken();
+                    context.log('Token refresh successful');
+                    return {
+                        status: 200,
+                        jsonBody: {
+                            access_token: newToken,
+                            expires_at: tokenStore.expires_at,
+                            status: 'refreshed'
+                        }
+                    };
+                } catch (refreshError) {
+                    context.log.error('Token refresh failed:', refreshError.message);
+                    // Fall through to return authorization required error
+                }
             }
 
             // No tokens available - need authorization

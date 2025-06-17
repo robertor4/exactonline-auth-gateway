@@ -290,6 +290,121 @@ In subsequent Web Activities calling Exact Online:
 }
 ```
 
+## Testing with Postman
+
+### Setting Up Postman Collection
+
+1. **Create a new Postman Collection** named "Exact Online Auth Gateway"
+
+2. **Add Collection Variables**:
+   - `base_url`: Your function app URL (e.g., `https://gpconnect-auth.azurewebsites.net`)
+   - `function_key`: Your function key from Azure Portal
+   - `auth_code`: Will be populated after manual authorization
+
+3. **Create the following requests**:
+
+#### Request 1: Get Authorization URL
+- **Method**: GET
+- **URL**: `{{base_url}}/api/authUrl?code={{function_key}}`
+- **Description**: Returns the Exact Online authorization URL
+
+#### Request 2: Exchange Authorization Code
+- **Method**: GET
+- **URL**: `{{base_url}}/api/authorize?code={{auth_code}}`
+- **Description**: Exchanges the authorization code for tokens (no function key needed)
+
+#### Request 3: Get Access Token
+- **Method**: GET
+- **URL**: `{{base_url}}/api/getToken?code={{function_key}}`
+- **Description**: Returns a valid access token for API calls
+
+#### Request 4: Check Status
+- **Method**: GET
+- **URL**: `{{base_url}}/api/status`
+- **Description**: Health check endpoint (no authentication required)
+
+### Testing the Initial Authorization Flow
+
+1. **Step 1 - Get Authorization URL**:
+   - Run the "Get Authorization URL" request
+   - Copy the `auth_url` from the response
+   - Example response:
+   ```json
+   {
+     "auth_url": "https://start.exactonline.nl/api/oauth2/auth?client_id=YOUR_CLIENT_ID&redirect_uri=https%3A%2F%2Fgpconnect-auth.azurewebsites.net%2Fapi%2Fauthorize&response_type=code",
+     "instructions": "Visit this URL to authorize the application"
+   }
+   ```
+
+2. **Step 2 - Manual Browser Authorization**:
+   - Open the authorization URL in a browser
+   - Log in to Exact Online
+   - Grant permissions to your application
+   - You'll be redirected to: `https://gpconnect-auth.azurewebsites.net/api/authorize?code=AUTHORIZATION_CODE`
+   - Copy the authorization code from the URL
+
+3. **Step 3 - Exchange Code for Tokens**:
+   - Update the `auth_code` collection variable with the code from Step 2
+   - Run the "Exchange Authorization Code" request
+   - Example response:
+   ```json
+   {
+     "message": "Authorization successful",
+     "access_token": "eyJ...",
+     "expires_in": 3600,
+     "token_type": "Bearer"
+   }
+   ```
+
+4. **Step 4 - Verify Setup**:
+   - Run the "Check Status" request
+   - Verify that `has_tokens` is `true`
+
+### Testing Token Retrieval
+
+After initial authorization, you can test token retrieval:
+
+1. Run the "Get Access Token" request
+2. The response will include a valid access token:
+   ```json
+   {
+     "access_token": "eyJ...",
+     "expires_at": 1704988800000,
+     "status": "valid"
+   }
+   ```
+
+### Tips for Postman Testing
+
+1. **Authentication Options**:
+   - Query parameter: `?code={{function_key}}`
+   - Header: Add `x-functions-key` with value `{{function_key}}`
+
+2. **Environment Setup**:
+   - Create separate environments for local development and production
+   - Local: `base_url` = `http://localhost:7071`
+   - Production: `base_url` = `https://your-function-app.azurewebsites.net`
+
+3. **Automated Testing**:
+   - Add tests to validate response structure
+   - Example test for token endpoint:
+   ```javascript
+   pm.test("Status code is 200", function () {
+       pm.response.to.have.status(200);
+   });
+   
+   pm.test("Response has access token", function () {
+       const jsonData = pm.response.json();
+       pm.expect(jsonData).to.have.property('access_token');
+       pm.expect(jsonData.access_token).to.be.a('string');
+   });
+   ```
+
+4. **Token Usage Example**:
+   - Create a request to test the token with Exact Online API
+   - Add authorization header: `Bearer {{access_token}}`
+   - Store the token from "Get Access Token" response as a variable
+
 ## Local Development
 
 1. Install Azure Functions Core Tools
@@ -353,12 +468,95 @@ In subsequent Web Activities calling Exact Online:
    - Missing or invalid function key
    - Add `?code=YOUR_FUNCTION_KEY` to URL or `x-functions-key` header
 
+5. **"No valid tokens available" despite completing authorization**
+   - This usually indicates the refresh token couldn't be stored in Key Vault
+   - Check if the Function App has proper Key Vault permissions
+   - Verify the refresh token exists: `az keyvault secret show --vault-name your-keyvault --name exact-refresh-token`
+   - If missing, the Function App likely lacks write permissions
+
+### Key Vault Permission Issues
+
+If tokens aren't persisting after authorization, the Function App may lack Key Vault permissions. This is a common issue when using RBAC-enabled Key Vaults.
+
+#### Symptoms:
+- Authorization succeeds but subsequent token requests fail
+- Status endpoint shows `has_tokens: true` but getToken returns "Initial authorization required"
+- Refresh token is missing from Key Vault
+
+#### Solution:
+
+1. **Check if refresh token exists in Key Vault**:
+   ```bash
+   az keyvault secret show --vault-name your-keyvault-name --name exact-refresh-token --query value -o tsv
+   ```
+
+2. **Get the Function App's managed identity**:
+   ```bash
+   az functionapp identity show --name your-function-app --resource-group your-resource-group --query principalId -o tsv
+   ```
+
+3. **Grant Key Vault permissions**:
+   
+   For RBAC-enabled Key Vaults:
+   ```bash
+   az role assignment create \
+     --role "Key Vault Secrets Officer" \
+     --assignee <managed-identity-id> \
+     --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.KeyVault/vaults/<keyvault-name>
+   ```
+   
+   For access policy Key Vaults:
+   ```bash
+   az keyvault set-policy \
+     --name your-keyvault-name \
+     --object-id <managed-identity-id> \
+     --secret-permissions get list set
+   ```
+
+4. **Re-run the authorization flow** after fixing permissions
+
+#### Verification:
+- After authorization, verify the refresh token is stored: `az keyvault secret show --vault-name your-keyvault --name exact-refresh-token`
+- The status endpoint should show valid tokens
+- Subsequent getToken calls should succeed
+
 ### Monitoring
 
 Check Function App logs in Azure Portal:
 - Monitor → Logs
 - Application Insights → Live Metrics
 - Key Vault → Monitoring → Logs
+
+#### Useful KQL Queries for Debugging
+
+1. **View all function executions**:
+   ```kql
+   requests
+   | where timestamp > ago(1h)
+   | where cloud_RoleName == "your-function-app-name"
+   | order by timestamp desc
+   | project timestamp, name, resultCode, duration, success, url
+   ```
+
+2. **Check token refresh logs**:
+   ```kql
+   traces
+   | where timestamp > ago(1h)
+   | where cloud_RoleName == "your-function-app-name"
+   | where message contains "refresh" or message contains "Token"
+   | order by timestamp desc
+   | project timestamp, message, severityLevel
+   ```
+
+3. **Find errors**:
+   ```kql
+   traces
+   | where timestamp > ago(1h)
+   | where cloud_RoleName == "your-function-app-name"
+   | where severityLevel == "Error" or severityLevel == "Critical"
+   | order by timestamp desc
+   | project timestamp, message, severityLevel
+   ```
 
 ## Production Considerations
 
