@@ -85,10 +85,25 @@ async function storeRefreshToken(refreshToken) {
  */
 async function getStoredRefreshToken() {
     try {
+        console.log('Attempting to retrieve refresh token from Key Vault...');
         const secret = await secretClient.getSecret('exact-refresh-token');
+        console.log('Refresh token retrieved from Key Vault:', {
+            hasValue: !!secret.value,
+            valueLength: secret.value ? secret.value.length : 0,
+            secretName: secret.name,
+            properties: {
+                enabled: secret.properties?.enabled,
+                createdOn: secret.properties?.createdOn,
+                updatedOn: secret.properties?.updatedOn
+            }
+        });
         return secret.value;
     } catch (error) {
-        console.log('No refresh token found in Key Vault');
+        console.error('Failed to retrieve refresh token from Key Vault:', {
+            message: error.message,
+            code: error.code,
+            statusCode: error.statusCode
+        });
         return null;
     }
 }
@@ -97,14 +112,33 @@ async function getStoredRefreshToken() {
  * Initialize token store from Key Vault on startup
  */
 async function initializeTokenStore() {
+    console.log('Initializing token store from Key Vault...');
+    console.log('Initial token store state:', {
+        hasAccessToken: !!tokenStore.access_token,
+        hasRefreshToken: !!tokenStore.refresh_token,
+        expiresAt: tokenStore.expires_at,
+        lastRefresh: tokenStore.last_refresh
+    });
+    
     try {
         const storedRefreshToken = await getStoredRefreshToken();
         if (storedRefreshToken) {
             tokenStore.refresh_token = storedRefreshToken;
-            console.log('Refresh token loaded from Key Vault');
+            console.log('Refresh token loaded from Key Vault into memory');
+            console.log('Updated token store state:', {
+                hasAccessToken: !!tokenStore.access_token,
+                hasRefreshToken: !!tokenStore.refresh_token,
+                expiresAt: tokenStore.expires_at,
+                lastRefresh: tokenStore.last_refresh
+            });
+        } else {
+            console.log('No refresh token found in Key Vault during initialization');
         }
     } catch (error) {
-        console.error('Failed to initialize token store:', error.message);
+        console.error('Failed to initialize token store:', {
+            message: error.message,
+            stack: error.stack
+        });
     }
 }
 
@@ -126,6 +160,20 @@ function isTokenValid() {
 function canRefreshToken() {
     const now = Date.now();
     const timeSinceLastRefresh = now - tokenStore.last_refresh;
+    
+    console.log('canRefreshToken check:', {
+        now: new Date(now).toISOString(),
+        lastRefresh: tokenStore.last_refresh ? new Date(tokenStore.last_refresh).toISOString() : 'never',
+        timeSinceLastRefresh: timeSinceLastRefresh,
+        minRefreshInterval: CONFIG.MIN_REFRESH_INTERVAL,
+        canRefresh: timeSinceLastRefresh >= CONFIG.MIN_REFRESH_INTERVAL
+    });
+    
+    // If last_refresh is 0 (never refreshed), allow refresh
+    if (tokenStore.last_refresh === 0) {
+        console.log('Never refreshed before, allowing refresh');
+        return true;
+    }
     
     return timeSinceLastRefresh >= CONFIG.MIN_REFRESH_INTERVAL;
 }
@@ -156,10 +204,17 @@ async function refreshAccessToken() {
     }
 
     if (!canRefreshToken()) {
+        console.error('Refresh blocked by time constraint');
         throw new Error('Cannot refresh token yet. Must wait 9.5 minutes between refreshes.');
     }
 
     const credentials = await getCredentials();
+    console.log('Credentials loaded for refresh:', {
+        hasClientId: !!credentials.CLIENT_ID,
+        hasClientSecret: !!credentials.CLIENT_SECRET,
+        hasRedirectUri: !!credentials.REDIRECT_URI,
+        redirectUri: credentials.REDIRECT_URI
+    });
     
     const params = new URLSearchParams({
         grant_type: 'refresh_token',
@@ -168,12 +223,29 @@ async function refreshAccessToken() {
         client_secret: credentials.CLIENT_SECRET,
         redirect_uri: credentials.REDIRECT_URI
     });
+    
+    console.log('Refresh request parameters:', {
+        grant_type: 'refresh_token',
+        hasRefreshToken: !!tokenStore.refresh_token,
+        refreshTokenLength: tokenStore.refresh_token ? tokenStore.refresh_token.length : 0,
+        clientId: credentials.CLIENT_ID,
+        redirectUri: credentials.REDIRECT_URI,
+        tokenUrl: CONFIG.EXACT_TOKEN_URL
+    });
 
     try {
+        console.log('Sending refresh request to:', CONFIG.EXACT_TOKEN_URL);
         const response = await axios.post(CONFIG.EXACT_TOKEN_URL, params, {
             headers: {
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
+        });
+
+        console.log('Refresh response received:', {
+            status: response.status,
+            hasAccessToken: !!response.data?.access_token,
+            hasRefreshToken: !!response.data?.refresh_token,
+            expiresIn: response.data?.expires_in
         });
 
         const now = Date.now();
@@ -187,24 +259,48 @@ async function refreshAccessToken() {
         // Store new refresh token in Key Vault
         await storeRefreshToken(response.data.refresh_token);
 
-        console.log('Tokens refreshed successfully');
+        console.log('Tokens refreshed successfully', {
+            expiresAt: new Date(tokenStore.expires_at).toISOString(),
+            lastRefresh: new Date(tokenStore.last_refresh).toISOString()
+        });
         
         return tokenStore.access_token;
     } catch (error) {
-        console.error('Token refresh failed:', {
+        console.error('Token refresh failed - Full error details:', {
             message: error.message,
-            response: error.response?.data,
-            status: error.response?.status,
-            headers: error.response?.headers
+            code: error.code,
+            response: {
+                status: error.response?.status,
+                statusText: error.response?.statusText,
+                data: error.response?.data,
+                headers: error.response?.headers
+            },
+            request: {
+                method: error.config?.method,
+                url: error.config?.url,
+                headers: error.config?.headers,
+                data: error.config?.data
+            }
         });
         
         // Provide more specific error message based on the error
         if (error.response?.status === 400) {
-            throw new Error(`Refresh token invalid or expired: ${JSON.stringify(error.response.data)}`);
+            const errorData = error.response.data;
+            console.error('400 Bad Request details:', errorData);
+            
+            // Check for specific error codes from Exact Online
+            if (errorData?.error === 'invalid_grant') {
+                throw new Error(`Refresh token is invalid or expired. Re-authorization required. Details: ${JSON.stringify(errorData)}`);
+            }
+            throw new Error(`Refresh request rejected: ${JSON.stringify(errorData)}`);
         } else if (error.response?.status === 401) {
             throw new Error('Refresh token unauthorized. Re-authorization required.');
+        } else if (error.response?.status === 403) {
+            throw new Error('Refresh forbidden. Check client credentials and permissions.');
+        } else if (!error.response) {
+            throw new Error(`Network error during refresh: ${error.message}`);
         } else {
-            throw new Error(`Failed to refresh token: ${error.message}`);
+            throw new Error(`Failed to refresh token: ${error.message} (Status: ${error.response?.status})`);
         }
     }
 }
@@ -251,7 +347,18 @@ async function exchangeCodeForTokens(authCode) {
 }
 
 // Initialize token store when the app starts
-initializeTokenStore().catch(console.error);
+console.log('Starting Exact Online Auth Gateway...');
+console.log('Environment configuration:', {
+    keyVaultUrl: KEY_VAULT_URL,
+    exactTokenUrl: CONFIG.EXACT_TOKEN_URL,
+    exactAuthUrl: CONFIG.EXACT_AUTH_URL,
+    minRefreshInterval: CONFIG.MIN_REFRESH_INTERVAL,
+    tokenBuffer: CONFIG.TOKEN_BUFFER
+});
+
+initializeTokenStore().catch(error => {
+    console.error('Failed to initialize token store:', error);
+});
 
 // Azure Function: Get valid access token
 app.http('getToken', {
@@ -272,7 +379,17 @@ app.http('getToken', {
             }
 
             // Try to refresh the token
-            if (tokenStore.refresh_token || await getStoredRefreshToken()) {
+            context.log('Token invalid or missing, checking refresh capability...');
+            const hasRefreshTokenInMemory = !!tokenStore.refresh_token;
+            const refreshTokenFromVault = hasRefreshTokenInMemory ? null : await getStoredRefreshToken();
+            
+            context.log('Refresh token check:', {
+                hasRefreshTokenInMemory,
+                foundRefreshTokenInVault: !!refreshTokenFromVault,
+                canAttemptRefresh: hasRefreshTokenInMemory || !!refreshTokenFromVault
+            });
+            
+            if (hasRefreshTokenInMemory || refreshTokenFromVault) {
                 context.log('Attempting to refresh token...');
                 try {
                     const newToken = await refreshAccessToken();
@@ -286,9 +403,14 @@ app.http('getToken', {
                         }
                     };
                 } catch (refreshError) {
-                    context.log.error('Token refresh failed:', refreshError.message);
+                    context.log('ERROR: Token refresh failed:', {
+                        error: refreshError.message,
+                        stack: refreshError.stack
+                    });
                     // Fall through to return authorization required error
                 }
+            } else {
+                context.log('No refresh token available in memory or Key Vault');
             }
 
             // No tokens available - need authorization
